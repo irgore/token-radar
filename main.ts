@@ -1,4 +1,6 @@
 // Token Radar entry — Node 22, standard library only.
+// Scans a DefiLlama snapshot, ranks pre-token protocols by implied launch value,
+// outputs a self-contained dashboard dossier.
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,21 +19,27 @@ function arg(name: string, fallback: string): string {
   return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
 }
 
+function die(code: number, msg: string): never {
+  process.stderr.write(`token radar: ${msg}\n`);
+  process.exit(code);
+}
+
 const inputArg = arg('input', '/input');
 const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
-if (!existsSync(inputFile)) {
-  process.stderr.write(`token radar: no snapshot at ${inputFile}; pass --input <file|dir>\n`);
-  process.exit(2);
-}
+if (!existsSync(inputFile)) die(2, `no snapshot at ${inputFile}; pass --input <file|dir>`);
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+const raw = readFileSync(inputFile, 'utf8');
+const snapshot = parseSnapshot(raw);
+process.stderr.write(`token radar: loaded ${snapshot.protocols.length} protocols (${snapshot.watchlist.length} on watchlist)\n`);
+
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
-if (issue !== null) {
-  process.stderr.write(`token radar: model wrote a board the gate refuses: ${issue}\n`);
-  process.exit(1);
-}
+if (issue !== null) die(1, `model wrote a board the gate refuses: ${issue}`);
+
+const top3 = board.slice(0, 3).map(r => `${r.name} ($${r.implied_value_usd.toLocaleString()})`).join(', ');
+process.stderr.write(`token radar: ranked ${board.length} protocols — top 3: ${top3}\n`);
+process.stderr.write(`token radar: ${radar.early_size} early-stage, ${radar.live_size} live tokens\n`);
 
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
@@ -53,15 +61,9 @@ function copyFiles(from: string, to: string): string[] {
 
 copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ has ${shots.length} image(s); need 3: board, detail, filtered\n`);
-  process.exit(1);
-}
+if (shots.length < 3) die(1, `screenshots/ has ${shots.length} image(s); need 3: board, detail, filtered`);
 for (const name of shots) {
-  if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar: screenshots/${name}: name must be letters, digits and . _ -\n`);
-    process.exit(1);
-  }
+  if (!IMAGE_NAME.test(name)) die(1, `screenshots/${name}: name must be letters, digits and . _ -`);
 }
 
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, {

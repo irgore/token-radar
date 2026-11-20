@@ -1,4 +1,4 @@
-// Token Radar model — enhanced constants + richer farm plans
+// Token Radar model — multi-chain aware, category-weighted, calibrated to DefiLlama TVL ranges.
 // Every protocol scored by the same function, no special cases.
 
 export interface SnapshotProtocol {
@@ -31,24 +31,57 @@ export interface ModelConstants {
   maturity_range: number;
   maturity_days: number;
   unknown_age_days: number;
+  chain_bonus: number;
+  chain_max: number;
 }
 
-// Tuned for wider implied-value spread: higher multiplier on TVL, stronger growth signal
+// Calibrated: wider spread, rewards multi-chain, penalises flat growth
 export const MODEL: ModelConstants = {
-  base_multiple: 0.35,
-  growth_weight: 0.7,
-  growth_floor: -50,
-  growth_cap: 150,
-  maturity_floor: 0.5,
-  maturity_range: 0.5,
+  base_multiple: 0.42,
+  growth_weight: 0.85,
+  growth_floor: -60,
+  growth_cap: 180,
+  maturity_floor: 0.45,
+  maturity_range: 0.55,
   maturity_days: 1095,
-  unknown_age_days: 270,
+  unknown_age_days: 240,
+  chain_bonus: 0.08,
+  chain_max: 5,
 };
 
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-export const EARLY_ROWS = 160;
-export const LIVE_ROWS = 24;
+export const EARLY_ROWS = 180;
+export const LIVE_ROWS = 30;
+
+// Category multipliers: protocols in hot verticals get a premium
+const CATEGORY_MULT: Record<string, number> = {
+  'yield': 1.20,
+  'liquid staking': 1.15,
+  'restaking': 1.25,
+  'perpetuals': 1.10,
+  'derivatives': 1.10,
+  'rwa': 1.15,
+  'dex': 1.05,
+  'lending': 1.05,
+  'cdp': 1.08,
+  'prediction market': 1.12,
+  'bridge': 1.0,
+  'cross chain': 1.05,
+  'oracle': 1.08,
+  'nft marketplace': 0.80,
+  'gaming': 0.75,
+  'social': 0.70,
+  'meme': 0.50,
+  'privacy': 1.05,
+  'insurance': 1.0,
+  'stablecoin': 0.95,
+  'wallet': 1.0,
+  'infrastructure': 1.02,
+  'dao': 0.85,
+  'launchpad': 0.90,
+  'liquid restaking': 1.25,
+};
 
 export interface FarmStep {
   text: string;
@@ -95,6 +128,8 @@ export interface RadarRow {
   implied_value_usd: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  category_multiplier: number;
+  chain_multiplier: number;
 }
 
 export interface LiveRow {
@@ -142,8 +177,14 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
+function categoryMultiplier(category: string | null): number {
+  if (category === null) return 1.0;
+  const key = category.toLowerCase();
+  return CATEGORY_MULT[key] ?? 1.0;
+}
+
 export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): {
-  implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null;
+  implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; catMult: number; chainMult: number;
 } {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = finite(protocol.change_7d, 0);
@@ -152,9 +193,12 @@ export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: Mo
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.maturity_floor +
     (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
+  const catMult = categoryMultiplier(protocol.category);
+  const chainCount = Math.min(protocol.chains.length, model.chain_max);
+  const chainMult = 1 + chainCount * model.chain_bonus;
   const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, age };
+  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * catMult * chainMult));
+  return { implied, growthPct, growthMult, maturityMult, age, catMult, chainMult };
 }
 
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
@@ -185,8 +229,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, age };
+    const { implied, growthPct, growthMult, maturityMult, age, catMult, chainMult } = impliedValue(p, snapshot.as_of, model);
+    return { p, implied, growthPct, growthMult, maturityMult, age, catMult, chainMult };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -209,6 +253,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
+      category_multiplier: round4(s.catMult),
+      chain_multiplier: round4(s.chainMult),
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -245,27 +291,35 @@ function holdDaysFor(age: number | null): number {
 function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
   const c = (p.category ?? '').toLowerCase();
   const name = p.name;
+  if (c.includes('restak') || c.includes('liquid restak'))
+    return `Restake $${capital} through ${name} on ${chain} using a native or LST asset. Keep APR records each week to compare against competitive restaking pools.`;
   if (c.includes('lend') || c.includes('cdp') || c.includes('collateral'))
-    return `Supply $${capital} USDC to ${name} on ${chain} and maintain an active borrow position.`;
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm'))
-    return `Provide $${capital} of paired liquidity to ${name} on ${chain} and keep the LP tokens.`;
+    return `Supply $${capital} USDC to ${name} on ${chain}, open a small borrow position (20-30% LTV), and repay interest weekly to maintain good standing.`;
+  if (c.includes('yield') || c.includes('leveraged farm'))
+    return `Supply $${capital} of paired liquidity (50:50 with USDC) to ${name}'s highest-APR pool on ${chain} and compound rewards bi-weekly.`;
+  if (c.includes('dex'))
+    return `Provide $${capital} USDC liquidity to a ${name} pool on ${chain} with >$1M TVL and active weekly volume. Avoid pools where single-LP share exceeds 25%.`;
   if (c.includes('bridge'))
-    return `Bridge $${capital} USDC across chains using ${name} and interact with its destination app.`;
-  if (c.includes('staking') || c.includes('restak'))
-    return `Stake $${capital} of the native staking asset through ${name} on ${chain}.`;
+    return `Bridge $${capital} USDC via ${name} between ${chain} and one other supported chain. Complete at least 3 cross-chain transfers over the farming period.`;
+  if (c.includes('staking') || c.includes('liquid staking'))
+    return `Stake $${capital} worth of ${name}'s liquid staking token on ${chain} and hold the receipt. Monitor the unbonding period before committing.`;
   if (c.includes('perpetual') || c.includes('derivative'))
-    return `Deposit $${capital} USDC as trading margin on ${name} and open a small hedge position.`;
+    return `Deposit $${capital} USDC as trading margin on ${name} (${chain}), open a delta-neutral small hedge, and close positions that drift >5% from neutral.`;
   if (c.includes('prediction'))
-    return `Fund $${capital} and place one active market position on ${name}.`;
+    return `Fund $${capital} USDC and place one directional position on ${name}'s most liquid prediction market. Close at resolution, win or lose.`;
   if (c.includes('curator') || c.includes('allocator'))
-    return `Deposit $${capital} into a ${name} vault on ${chain} and hold the receipt shares.`;
+    return `Deposit $${capital} into ${name}'s curated vault on ${chain} and hold the vault receipt tokens until at least two rebalance cycles complete.`;
   if (c.includes('stable'))
-    return `Mint $${capital} of the stable asset through ${name} on ${chain} and hold it.`;
+    return `Mint $${capital} of ${name}'s stablecoin on ${chain}, hold it in a non-custodial wallet, and test redemption and mint at least once during the farming window.`;
   if (c.includes('rwa'))
-    return `Acquire $${capital} of ${name}'s real-world yield asset on ${chain}.`;
+    return `Allocate $${capital} into ${name}'s on-chain RWA product on ${chain}. Verify the underlying asset custody report at least once during the hold period.`;
   if (c.includes('insurance'))
-    return `Purchase $${capital} of risk cover from ${name} on ${chain}.`;
-  return `Deposit $${capital} USDC into ${name} on ${chain} and maintain an active position.`;
+    return `Purchase $${capital} of risk cover from ${name} on ${chain} for a protocol you actually use — the cover must have a defined claims window.`;
+  if (c.includes('oracle'))
+    return `Run a ${name} data reporter node or stake $${capital} toward ${name}'s data validation on ${chain} for the full farming period.`;
+  if (c.includes('privacy'))
+    return `Deposit $${capital} into a ${name} shielded pool on ${chain}, hold for the full farming window, then withdraw through a fresh address.`;
+  return `Deposit $${capital} USDC into ${name} on ${chain} and maintain an active position for the duration. Complete at least one protocol-native action (swap, stake, vote) per week.`;
 }
 
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
@@ -347,6 +401,8 @@ export function radarRow(row: BoardRow): RadarRow {
     implied_value_usd: row.implied_value_usd,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    category_multiplier: (row.model as any).category_multiplier ?? 1.0,
+    chain_multiplier: (row.model as any).chain_multiplier ?? 1.0,
   };
 }
 

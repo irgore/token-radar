@@ -215,7 +215,9 @@ function renderDetail() {
     <div class="detail-stat"><span class="label">Age</span><span class="val">${r.age_days !== null ? `${r.age_days} days` : 'unknown'}</span></div>
     <div class="detail-stat"><span class="label">Growth Multiplier</span><span class="val">${r.growth_multiplier.toFixed(3)}</span></div>
     <div class="detail-stat"><span class="label">Maturity Multiplier</span><span class="val">${r.maturity_multiplier.toFixed(3)}</span></div>
-    <div class="detail-stat"><span class="label">Category</span><span class="val">${r.category || '—'}</span></div>
+    <div class="detail-stat"><span class="label">Category Weight</span><span class="val">${(r.category_multiplier ?? 1.0).toFixed(2)}</span></div>
+    <div class="detail-stat"><span class="label">Chain Bonus</span><span class="val">${(r.chain_multiplier ?? 1.0).toFixed(2)}</span></div>
+    <div class="detail-stat"><span class="label">Category</span><span class="val">${r.category || ''}</span></div>
     <div class="detail-stat"><span class="label">Chains</span><span class="val" style="font-size:13px">${r.chains.slice(0, 5).join(', ')}${r.chains.length > 5 ? ` +${r.chains.length - 5} more` : ''}</span></div>
   </div>`;
 
@@ -248,6 +250,7 @@ function renderModel() {
     <div class="model-item"><span class="label">Growth Range</span><span class="val">${m.growth_floor}% to ${m.growth_cap}%</span></div>
     <div class="model-item"><span class="label">Maturity Range</span><span class="val">${m.maturity_floor}–${(m.maturity_floor + m.maturity_range).toFixed(1)} over ${m.maturity_days}d</span></div>
     <div class="model-item"><span class="label">Unknown Age</span><span class="val">${m.unknown_age_days} days</span></div>
+    <div class="model-item"><span class="label">Chain Bonus</span><span class="val">+${(m.chain_bonus * 100).toFixed(0)}% per chain (max ${m.chain_max})</span></div>
     <div class="model-item"><span class="label">Early Rows</span><span class="val">${RADAR.early_size} below $${FMT_NUM.format(RADAR.floor_usd)}</span></div>
   </div>`;
   return el;
@@ -255,7 +258,7 @@ function renderModel() {
 
 function renderFooter() {
   const el = ce('footer');
-  el.innerHTML = `<span>radar-2</span> · ${RADAR.source} · snapshot ${RADAR.as_of}`;
+  el.innerHTML = `<span>radar-3</span> · ${RADAR.source} · snapshot ${RADAR.as_of}`;
   return el;
 }
 
